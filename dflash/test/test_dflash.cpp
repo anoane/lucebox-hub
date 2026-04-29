@@ -830,6 +830,7 @@ int main(int argc, char ** argv) {
     // paper's pure-attention Qwen3 experiments). Default budget = 64.
     bool  seq_verify    = false;
     bool  fast_rollback = false;
+    bool  cublas_deterministic = false;  // fix/cublas: force deterministic GEMM
     bool  ddtree_mode   = false;
     int   ddtree_budget = 64;
     float ddtree_temp   = 1.0f;   // softmax temperature for top-K extract
@@ -853,6 +854,9 @@ int main(int argc, char ** argv) {
         }
         else if (std::strcmp(argv[i], "--ddtree-no-chain-seed") == 0) {
             ddtree_chain_seed = false;
+        }
+        else if (std::strcmp(argv[i], "--cublas-deterministic") == 0) {
+            cublas_deterministic = true;
         }
         else if (std::strcmp(argv[i], "--test-window") == 0)      { test_window_mode = true; }
     else if (std::strcmp(argv[i], "--profile-scaling") == 0) {
@@ -908,6 +912,16 @@ int main(int argc, char ** argv) {
     if (fast_rollback && seq_verify && !ddtree_mode) {
         std::fprintf(stderr, "--fast-rollback and --seq-verify are mutually exclusive\n");
         return 2;
+    }
+    // Loop-attractor fix (two parts, both required):
+    //   Part A (this flag): cuBLAS non-determinism — CUBLAS_WORKSPACE_CONFIG=:4096:8.
+    //   Part B (llama.cpp submodule b6ffab4): fattn chunked-FA routing regression —
+    //     DFLASH27B_CHUNKED_THRESHOLD defaulted to 0 so non-TQ3 K/V stay on MMA path.
+    //     Also fixes V->type copy-paste bug (was checking K->type for V-side kv_supported).
+    //     See: dflash/deps/llama.cpp @ b6ffab4a9 (fix/chunked-fa-routing-regression).
+    if (cublas_deterministic) {
+        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
+        std::printf("[cfg] cublas_deterministic=ON (CUBLAS_WORKSPACE_CONFIG=:4096:8)\n");
     }
     std::printf("[cfg] seq_verify=%d fast_rollback=%d ddtree=%d budget=%d temp=%.2f chain_seed=%d fa_window=%d\n",
                 (int)seq_verify, (int)fast_rollback, (int)ddtree_mode,
