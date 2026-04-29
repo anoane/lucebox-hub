@@ -162,6 +162,13 @@ cmake --build build --target test_dflash -j
 
 ---
 
+## Benchmarks
+
+RTX PRO 6000 Blackwell (sm_120) QMATRIX results for Qwen3.6-27B Q4_K_M + DFlash drafter (Apr-28-2026): sec@32K **86.46 tok/s / 100 quality**, code@32K **101.03 tok/s / 100 quality** using `--preset=audit` (acceptwin p95+4).  
+Full results table and reproduction steps: [docs/RTX6000_PRO_QWEN36_BENCHMARKS.md](docs/RTX6000_PRO_QWEN36_BENCHMARKS.md)
+
+---
+
 ## Why this exists
 
 Local AI should be a default, not a privilege: private data, no per-token bill, no vendor lock-in. The hardware to run capable models already sits on desks. The software to run those chips well doesn't.
