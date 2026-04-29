@@ -42,17 +42,34 @@ export DFLASH27B_FA_WINDOW=0   # disable sliding-window FA for long-context
 export DFLASH27B_LM_HEAD_FIX=1 # head dequant fix for sm_120
 ```
 
-### Run command (per cell)
+### Run commands
 
+**fix + acceptwin** (recommended for 32K, best quality):
 ```bash
+DFLASH27B_FA_WINDOW=0 DFLASH27B_LM_HEAD_FIX=1 \
 ./dflash/build/test_dflash \
   ./models/aeon-q4k/model.gguf \
   ./models/dflash-drafter-apr28/model.safetensors \
   ./prompts/<class>.<ctx>.bin \
   24576 \
-  ./output/<class>_<ctx>.bin \
+  ./output/<class>_<ctx>_acceptwin.bin \
   --max-ctx=$((ctx + 64000)) \
-  --preset=audit          # OR: --ddtree --ddtree-budget=22 --fast-rollback
+  --preset=audit
+```
+
+**fix + b22** (recommended for 64K+, fastest at long context):
+```bash
+DFLASH27B_FA_WINDOW=0 DFLASH27B_LM_HEAD_FIX=1 \
+./dflash/build/test_dflash \
+  ./models/aeon-q4k/model.gguf \
+  ./models/dflash-drafter-apr28/model.safetensors \
+  ./prompts/<class>.<ctx>.bin \
+  24576 \
+  ./output/<class>_<ctx>_b22.bin \
+  --max-ctx=$((ctx + 64000)) \
+  --ddtree --fast-rollback \
+  --ddtree-budget=22 \
+  --ddtree-temp=1.0
 ```
 
 ---
@@ -104,6 +121,43 @@ Score = 0–100 (Opus 4.7). tok/s = decode throughput (excludes prefill).
 | 64K | 86.14 | 90 | **94.69** | **95** | 68.19 | 75 |
 | 128K | 75.98 | 95 | 82.30 | 90 | 51.69 | 90 |
 | 256K | 58.27 | 75 | 61.29 | 90 | 33.23 | 95 |
+
+---
+
+## fix.patch quality impact — acceptwin with `DFLASH27B_LM_HEAD_FIX` ON vs OFF
+
+`DFLASH27B_LM_HEAD_FIX=1` (default) routes the LM-head GEMM through cuBLAS instead of
+MMQ. See `dflash/patches/fix-lm-head-mmq-routing.patch` and `dflash/docs/LOOP_FIX.md`
+for the root-cause write-up (short version: `ggml_cuda_mul_mat_q` picks `mmq_x` tile
+size per `N = 1 + tree.n_nodes`; different tile shapes produce bit-level logit differences
+that flip near-tie token pairs → loop attractor at static budgets 36, 56, 64).
+
+**For acceptwin the dynamic budget stays at N=9–11, which never hits the looping shapes.**
+Fix OFF does not cause loops with acceptwin. It does, however, send the model down a
+different (and consistently worse) stochastic path because MMQ logits ≠ cuBLAS logits at
+column 0.
+
+Test conditions: AEON Q4_K_M + DFlash drafter Apr-28-2026, RTX PRO 6000 Blackwell sm_120,
+`--preset=audit`, `DFLASH27B_FA_WINDOW=0`, `--max-ctx=96768`, n=24576. Two independent
+runs per cell — results are bit-identical within fix ON / fix OFF groups.
+
+| cell | fix ON tok/s | fix ON score | fix OFF tok/s | fix OFF score | quality Δ | speed Δ |
+|------|-------------|-------------|--------------|--------------|-----------|---------|
+| sec@32K | 86.62 | **100** | 97.18 | 72 | **−28** | +12% |
+| arch@32K | 73.93 | **92** | 79.90 | 87 | −5 | +8% |
+| code@32K | 100.37 | **100** | 121.15 | 95 | −5 | +21% |
+
+Fix OFF is 8–21% faster (MMQ kernel is quicker than cuBLAS dequant for single-row LM head).
+The quality cost ranges from −5 pts (arch/code) to −28 pts (sec). The sec regression is
+severe: fix OFF produces 7 distinct findings vs 23, and only 1 MISRA rule vs 22 — the
+shorter stochastic thinking chain skips the majority of the rubric.
+
+**Keep `DFLASH27B_LM_HEAD_FIX=1` (default) unless profiling confirms the LM head is your
+bottleneck and you can tolerate lower output quality.**
+
+For static budgets (not acceptwin), `DFLASH27B_LM_HEAD_FIX=0` causes hard loops at
+budgets 36, 56, and 64 — score drops to 0/100. Do not disable the fix with static budgets
+on sm_120.
 
 ---
 
@@ -166,13 +220,29 @@ All prompts are binary token files (4-byte little-endian int32 per token) genera
 - **code**: Refactoring task (legacy C++ codebase)
 
 ```bash
-# Example: reproduce sec@32K acceptwin result
-export DFLASH27B_FA_WINDOW=0 DFLASH27B_LM_HEAD_FIX=1
+# Reproduce sec@32K acceptwin (fix ON — recommended)
+DFLASH27B_FA_WINDOW=0 DFLASH27B_LM_HEAD_FIX=1 \
 ./dflash/build/test_dflash \
-  aeon-q4k.gguf dflash-drafter-apr28.safetensors \
-  prompts/sec.32768.bin 24576 out/sec_32768.bin \
-  --max-ctx=96768 --preset=audit
-# Expected: ~86.46 tok/s, 16627 tokens generated
+  models/aeon-q4k.gguf models/dflash-drafter-apr28/model.safetensors \
+  prompts/sec.32768.bin 24576 out/sec_32k_acceptwin.bin \
+  --max-ctx=96768 \
+  --preset=audit
+# Expected: ~86.6 tok/s, 16627 tokens, score 100/100
+
+# Reproduce sec@32K b22 (fix ON, long-context preset)
+DFLASH27B_FA_WINDOW=0 DFLASH27B_LM_HEAD_FIX=1 \
+./dflash/build/test_dflash \
+  models/aeon-q4k.gguf models/dflash-drafter-apr28/model.safetensors \
+  prompts/sec.32768.bin 24576 out/sec_32k_b22.bin \
+  --max-ctx=96768 \
+  --ddtree --fast-rollback \
+  --ddtree-budget=22 \
+  --ddtree-temp=1.0
+# Expected: ~77.3 tok/s, score 96/100
 ```
+
+Apply `dflash/patches/fix-lm-head-mmq-routing.patch` to the llama.cpp submodule before
+building (see `dflash/docs/LOOP_FIX.md`). Without it, `DFLASH27B_LM_HEAD_FIX=1` has no
+effect and static budgets 36/56/64 will loop.
 
 Grading uses Claude Opus 4.7 with a structured rubric (see `dflash/scripts/grade_audit.py`).
